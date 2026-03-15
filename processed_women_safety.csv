@@ -1,0 +1,318 @@
+import streamlit as st
+from streamlit_option_menu import option_menu
+import pandas as pd
+import numpy as np
+import plotly.express as px
+from folium.plugins import HeatMap
+import folium
+import streamlit.components.v1 as components  # Required for stable map rendering
+from datetime import datetime
+import cv2
+import time
+
+# ===================== MODULAR IMPORTS =====================
+# UI & Utils
+from src.ui_utils import load_custom_css, render_feature_card, render_sidebar_header
+from src.gps_engine import get_coords
+from src.alert_engine import check_and_play_alert
+from src.analytics_engine import process_data
+
+# Backend & Logic
+try:
+    from src.firebase_db import log_event, fetch_history
+    from src.model_engine import ModelEngine
+    from src.yolo_engine import load_yolo, detect_threat
+    from src.utils import compute_score
+    backend_online = True
+except ImportError:
+    backend_online = False
+    # Import Mocks if backend fails
+    from src.mocks import MockModelEngine as ModelEngine, mock_detect_threat as detect_threat, mock_fetch_history as fetch_history
+    def load_yolo(): return None
+    # Mock log_event to prevent crashes in Demo Mode
+    def log_event(a, b, c): pass 
+
+# Initialize Global Objects
+model_engine = ModelEngine()
+
+# ===================== PAGE CONFIG =====================
+st.set_page_config(
+    page_title="Women Safety",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+if 'last_alert_time' not in st.session_state:
+    st.session_state['last_alert_time'] = 0
+
+# Initialize logging timer to prevent database spam
+if 'last_log_time' not in st.session_state:
+    st.session_state['last_log_time'] = 0
+
+load_custom_css()
+
+# ===================== SIDEBAR =====================
+with st.sidebar:
+    render_sidebar_header()
+    
+    selected = option_menu(
+        menu_title=None,
+        options=["Dashboard", "Live Surveillance", "History & Reports"],
+        icons=["grid-fill", "camera-reels-fill", "file-text-fill"],
+        default_index=0,
+        styles={
+            "container": {"padding": "0!important", "background-color": "transparent"},
+            "icon": {"color": "#555", "font-size": "18px"}, 
+            "nav-link": {"font-size": "15px", "text-align": "left", "margin":"5px", "color": "#333"},
+            "nav-link-selected": {"background-color": "#e8f5e9", "color": "#00C853", "font-weight": "600", "border-left": "4px solid #00C853"},
+        }
+    )
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # Status
+    st.markdown("##### System Health")
+    status_text = "Backend Online" if backend_online else "Demo Mode"
+    status_color = "#166534" if backend_online else "#ca8a04"
+    bg_color = "#dcfce7" if backend_online else "#fef9c3"
+    
+    st.markdown(f"""
+        <div class="status-badge" style="background-color: {bg_color}; color: {status_color};">
+            <div style="width: 8px; height: 8px; background-color: {status_color}; border-radius: 50%;"></div>
+            {status_text}
+        </div>
+    """, unsafe_allow_html=True)
+    
+    st.markdown("##### Quick Settings")
+    if "audio_alert" not in st.session_state:
+        st.session_state["audio_alert"] = True
+    st.toggle("🔊 Audio Alerts", key="audio_alert")
+
+    st.markdown("""
+        <div style="margin-top: 50px; font-size: 0.8rem; color: #888; text-align: center;">
+            v2.5.0 | © 2025 WomenSafety<br>
+            Secure • Smart • Safe
+        </div>
+    """, unsafe_allow_html=True)
+
+# ===================== PAGE 1: DASHBOARD =====================
+if selected == "Dashboard":
+    st.title("Operations Dashboard")
+    st.markdown(f"*{datetime.now().strftime('%A, %d %B %Y')}*")
+    st.markdown("---")
+
+    c1, c2, c3 = st.columns(3)
+    with c1: render_feature_card("🧠", "Neural Engine", "Powered by <b>YOLOv8 & KMeans</b> for sub-second threat detection.")
+    with c2: render_feature_card("🌍", "Live Mapping", "Real-time geospatial heatmaps identifying <b>high-risk zones</b>.")
+    with c3: render_feature_card("📄", "Auto Reporting", "Generate <b>instant PDF reports</b> for law enforcement and auditing.")
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+
+    with st.expander("📂 Import Crime Data (CSV)", expanded=True):
+        uploaded_file = st.file_uploader("Upload CSV", type="csv", label_visibility="collapsed")
+
+    if uploaded_file:
+        df_raw, df_processed = process_data(uploaded_file, model_engine)
+        
+        total = len(df_raw)
+        f_cases = len(df_raw[df_raw["Victim Gender"]=="F"]) if "Victim Gender" in df_raw.columns else 0
+        m_cases = len(df_raw[df_raw["Victim Gender"]=="M"]) if "Victim Gender" in df_raw.columns else 0
+        avg_score = df_processed['safety_score'].mean() if 'safety_score' in df_processed.columns else 0
+        
+        st.markdown("### 📊 Analytics Overview")
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Incidents", total, "Verified Reports")
+        c2.metric("Female Victims", f_cases, f"{int((f_cases/total)*100) if total else 0}%")
+        c3.metric("Male Victims", m_cases, f"{int((m_cases/total)*100) if total else 0}%")
+        c4.metric("Avg Safety Score", f"{avg_score:.1f}", "Target: >90")
+
+        t1, t2, t3 = st.tabs(["Charts & Graphs", "Geospatial Heatmap", "📋 Incident Logs"])
+        
+        with t1:
+            cl, cr = st.columns(2)
+            with cl:
+                st.subheader("Gender Distribution")
+                if "Victim Gender" in df_raw.columns:
+                    fig = px.pie(df_raw, names="Victim Gender", hole=0.6, color_discrete_sequence=px.colors.sequential.Greens_r)
+                    st.plotly_chart(fig, use_container_width=True)
+                else: st.info("No Gender column.")
+            with cr:
+                st.subheader("High Risk Cities")
+                if "City" in df_processed.columns:
+                    city_risk = df_processed.groupby("City")["safety_score"].mean().reset_index().sort_values("safety_score").head(5)
+                    fig_bar = px.bar(city_risk, x="safety_score", y="City", orientation='h', color="safety_score", color_continuous_scale="Reds_r")
+                    st.plotly_chart(fig_bar, use_container_width=True)
+        
+        with t2:
+            st.subheader("Risk Heatmap")
+            
+            # 1. Create Base Map
+            m = folium.Map(location=[20.59, 78.96], zoom_start=5, tiles="OpenStreetMap")
+            
+            # 2. Prepare Data
+            heat_data = []
+            if "City" in df_processed.columns:
+                cities = df_processed["City"].unique()
+                for city in cities:
+                    coords = get_coords(str(city))
+                    if coords:
+                        city_data = df_processed[df_processed["City"] == city]
+                        score = city_data["safety_score"].mean()
+                        
+                        if pd.notna(score):
+                            # Invert score: Low score = High intensity (Red)
+                            weight = (100 - score) / 100
+                            heat_data.append([coords[0], coords[1], weight])
+
+            # 3. Add Layer
+            if heat_data:
+                HeatMap(heat_data, radius=25, blur=15).add_to(m)
+                st.caption(f"✅ Loaded heatmap for {len(heat_data)} cities.")
+            else:
+                st.warning("⚠️ No matching city coordinates found.")
+
+            # 4. Render using Components (Fixes Blank Map in Tabs)
+            map_html = m._repr_html_()
+            components.html(map_html, height=500, scrolling=False)
+            
+        with t3:
+            st.subheader("Detailed Incident Logs")
+            st.dataframe(df_raw, use_container_width=True, height=500)
+
+# ===================== PAGE 2: LIVE SURVEILLANCE =====================
+elif selected == "Live Surveillance":
+    st.title("Smart Surveillance")
+    st.markdown("Real-time threat detection feed.")
+    
+    col_main, col_ctrl = st.columns([3, 1.2])
+    
+    with col_ctrl:
+        st.markdown("### Control Center")
+        
+        # System Status Card
+        st.markdown("""
+        <div class="live-stat-card" style="border-left: 5px solid #00C853;">
+            <h5 style="margin:0; color:#555; font-size:0.9rem;">System Status</h5>
+            <p style="margin:5px 0 0 0; color:#00C853; font-weight:700; font-size:1.1rem;">● Monitoring Active</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        stats_container = st.empty()
+
+        st.markdown("---")
+        st.markdown("##### Configuration")
+        run_cam = st.toggle("Activate Camera", value=False, key="cam_toggle")
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        sensitivity = st.slider("⚠️ AI Sensitivity", 0.0, 1.0, 0.5)
+        st.info("💡 **Tip:** Increase sensitivity to reduce false positives.")
+
+    with col_main:
+        st.markdown('<div class="monitor-frame">', unsafe_allow_html=True)
+        feed_placeholder = st.empty()
+        
+        if run_cam:
+            try:
+                model = load_yolo()
+                if model: model.conf = sensitivity 
+                cap = cv2.VideoCapture(0)
+                
+                while run_cam:
+                    ret, frame = cap.read()
+                    if not ret: break
+                    
+                    res, msg, risk = detect_threat(frame, model)
+                    
+                    # Count Persons
+                    try:
+                        if hasattr(res, 'boxes'):
+                            class_ids = res.boxes.cls.cpu().numpy()
+                            person_count = np.sum(class_ids == 0)
+                        else: person_count = 0
+                    except: person_count = 0
+                    
+                    # Update Stats
+                    stats_container.markdown(f"""
+                        <div class="live-stat-card">
+                            <div class="live-stat-value">{person_count}</div>
+                            <div class="live-stat-label">People Detected</div>
+                        </div>
+                    """, unsafe_allow_html=True)
+
+                    # Display
+                    if hasattr(res, 'plot'):
+                        img_display = cv2.cvtColor(res.plot(), cv2.COLOR_BGR2RGB)
+                    else:
+                        img_display = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    feed_placeholder.image(img_display, use_container_width=True)
+                    
+                    # --- AUTO-LOGGING FIX ---
+                    # Alert & Logging
+                    st.session_state['last_alert_time'] = check_and_play_alert(msg, st.session_state['last_alert_time'])
+                    
+                    if msg: 
+                        st.toast(f"⚠️ {msg}")
+                        
+                        # LOG TO FIREBASE (Only log if enough time passed to avoid spamming DB)
+                        current_time = time.time()
+                        if current_time - st.session_state.get('last_log_time', 0) > 5:  # Log max once every 5 seconds
+                            
+                            # FIX: Use positional arguments instead of keywords to avoid TypeError
+                            try:
+                                log_event(
+                                    "Threat Detected",                  # event_type
+                                    msg,                                # details
+                                    "High" if "Weapon" in msg else "Moderate" # risk_level
+                                )
+                            except Exception as e:
+                                st.warning(f"Logging failed: {e}")
+
+                            st.session_state['last_log_time'] = current_time
+                    # ------------------------
+                            
+                cap.release()
+            except Exception as e:
+                st.error(f"Surveillance Error: {e}")
+        else:
+            st.markdown("""
+            <div class="standby-overlay">
+                <img src="https://cdn-icons-png.flaticon.com/512/3683/3683218.png" width="80" style="opacity:0.5; margin-bottom:15px;">
+                <h2 style="color:#2d3436; font-weight:700;">SYSTEM STANDBY</h2>
+                <p>Surveillance feed is disabled.</p>
+                <p style="font-size:0.8rem; color:#888;">Toggle 'Activate Camera' to resume monitoring.</p>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            stats_container.markdown(f"""
+                <div class="live-stat-card">
+                    <div class="live-stat-value">--</div>
+                    <div class="live-stat-label">People Detected</div>
+                </div>
+            """, unsafe_allow_html=True)
+            
+        st.markdown('</div>', unsafe_allow_html=True)
+
+# ===================== PAGE 3: HISTORY =====================
+elif selected == "History & Reports":
+    st.title("System History")
+    st.markdown("Audit trail of system events (Alerts, Logins, Hardware Status).")
+
+    records = fetch_history()
+    
+    if records:
+        df_hist = pd.DataFrame(records)
+        st.dataframe(
+            df_hist, 
+            use_container_width=True, 
+            column_config={
+                "Timestamp": st.column_config.TextColumn("Time"),
+                "Module": st.column_config.TextColumn("Source"),
+                "Status": st.column_config.Column("Status", width="small")
+            },
+            hide_index=True
+        )
+        csv = df_hist.to_csv(index=False).encode('utf-8')
+        st.download_button("📄 Download Audit Log", csv, "audit_log.csv", "text/csv")
+    else:
+        st.info("No system history found.")

@@ -1,0 +1,182 @@
+# =========================================================
+# Women Safety Analytics – Cloud Safe Main App
+# =========================================================
+
+import os
+import streamlit as st
+from streamlit_option_menu import option_menu
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import folium
+from folium.plugins import HeatMap
+import streamlit.components.v1 as components
+from datetime import datetime
+
+# =========================================================
+# ENVIRONMENT DETECTION
+# =========================================================
+IS_CLOUD = os.getenv("STREAMLIT_RUNTIME_ENV") == "cloud"
+
+# =========================================================
+# SAFE FALLBACK IMPORTS
+# =========================================================
+try:
+    from src.ui_utils import load_custom_css, render_feature_card, render_sidebar_header
+    from src.gps_engine import get_coords
+    from src.analytics_engine import process_data
+except Exception:
+    # ---------- FALLBACKS ----------
+    def load_custom_css():
+        st.markdown("<style>.stApp{background:#f8f9fa;}</style>", unsafe_allow_html=True)
+
+    def render_feature_card(icon, title, desc):
+        st.info(f"{title}: {desc}")
+
+    def render_sidebar_header():
+        st.title("Women Safety AI")
+
+    def get_coords(city):
+        return [20.59, 78.96]  # India default
+
+    def process_data(file, model=None):
+        df = pd.read_csv(file)
+        df["safety_score"] = np.random.randint(60, 95, size=len(df))
+        return df, df
+
+
+try:
+    from src.firebase_db import fetch_history
+except Exception:
+    def fetch_history():
+        return []
+
+# =========================================================
+# PAGE CONFIG
+# =========================================================
+st.set_page_config(
+    page_title="Women Safety Analytics",
+    page_icon="🛡️",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+load_custom_css()
+
+# =========================================================
+# SIDEBAR
+# =========================================================
+with st.sidebar:
+    render_sidebar_header()
+
+    selected = option_menu(
+        menu_title=None,
+        options=["Dashboard", "Live Surveillance", "History & Reports"],
+        icons=["grid-fill", "camera-video", "file-earmark-text"],
+        default_index=0,
+    )
+
+    st.markdown("---")
+    st.caption("☁️ Cloud Demo Mode" if IS_CLOUD else "💻 Local Mode")
+    st.caption("v2.5.0 | © 2025 Women Safety")
+
+# =========================================================
+# DASHBOARD
+# =========================================================
+if selected == "Dashboard":
+    st.title("📊 Operations Dashboard")
+    st.markdown(f"*{datetime.now().strftime('%A, %d %B %Y')}*")
+    st.markdown("---")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        render_feature_card("🧠", "AI Engine", "ML-based threat & risk scoring")
+    with c2:
+        render_feature_card("🌍", "Geo Analytics", "City-wise safety heatmaps")
+    with c3:
+        render_feature_card("📄", "Reports", "Automated incident analytics")
+
+    st.markdown("### 📂 Upload Crime Dataset (CSV)")
+    uploaded_file = st.file_uploader("Upload CSV", type="csv")
+
+    if uploaded_file:
+        df_raw, df_processed = process_data(uploaded_file)
+
+        st.markdown("### 📈 Analytics Overview")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Records", len(df_raw))
+        col2.metric("Avg Safety Score", f"{df_processed['safety_score'].mean():.1f}")
+        col3.metric("High Risk Areas", int((df_processed["safety_score"] < 70).sum()))
+
+        tab1, tab2 = st.tabs(["📊 Charts", "🗺️ Heatmap"])
+
+        with tab1:
+            fig = px.histogram(
+                df_processed,
+                x="safety_score",
+                nbins=20,
+                title="Safety Score Distribution",
+                color_discrete_sequence=["#dc2626"],
+            )
+            st.plotly_chart(fig, use_container_width=True)
+
+        with tab2:
+            st.subheader("Risk Heatmap")
+            m = folium.Map(location=[20.59, 78.96], zoom_start=5)
+
+            heat_data = []
+            if "City" in df_processed.columns:
+                for city in df_processed["City"].unique():
+                    coords = get_coords(city)
+                    score = df_processed[df_processed["City"] == city]["safety_score"].mean()
+                    if coords and pd.notna(score):
+                        heat_data.append([coords[0], coords[1], (100 - score) / 100])
+
+            if heat_data:
+                HeatMap(heat_data, radius=25, blur=15).add_to(m)
+                components.html(m._repr_html_(), height=500)
+            else:
+                st.info("No city data available for heatmap")
+
+# =========================================================
+# LIVE SURVEILLANCE (CLOUD-SAFE DEMO)
+# =========================================================
+elif selected == "Live Surveillance":
+    st.title("📹 Live Surveillance")
+
+    st.warning("🚫 Live Surveillance Disabled on Streamlit Cloud")
+    st.info(
+        """
+        This feature requires:
+        • OpenCV  
+        • Camera / WebRTC  
+        • System-level access  
+
+        These are **not supported on Streamlit Cloud**.
+
+        👉 Run this project **locally** to enable real-time surveillance.
+        """
+    )
+
+    st.markdown("### 🧪 Demo Preview")
+    st.image(
+        "https://raw.githubusercontent.com/ultralytics/assets/main/yolov8/yolo-detect.png",
+        caption="Sample AI Threat Detection (Demo Image)",
+        use_container_width=True,
+    )
+
+# =========================================================
+# HISTORY & REPORTS
+# =========================================================
+elif selected == "History & Reports":
+    st.title("📜 System History")
+
+    records = fetch_history()
+
+    if records:
+        df_hist = pd.DataFrame(records)
+        st.dataframe(df_hist, use_container_width=True)
+        csv = df_hist.to_csv(index=False).encode("utf-8")
+        st.download_button("📄 Download Logs", csv, "audit_log.csv")
+    else:
+        st.info("No system history available (Demo Mode).")

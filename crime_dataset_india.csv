@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Environments
+env/
+venv/
+*.env
+
+# Model files (large)
+*.pt
+*.pkl
+
+# Firebase secrets
+firebase_key.json
+
+# Streamlit cache
+.streamlit/
+
+# Database
+*.sqlite
+*.db
+
+# Notebooks
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db

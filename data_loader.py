@@ -1,0 +1,9 @@
+streamlit
+streamlit-option-menu
+pandas
+numpy
+plotly
+folium
+streamlit-folium
+geopy
+firebase-admin
